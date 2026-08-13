@@ -1,0 +1,70 @@
+# posthog-bell-counter-c6 — the one combined device this demo drives.
+#
+# Both the bell servo and the MAX7219 panel are drivers on a single ESP32-C6,
+# so the service holds one JETTYD_DEVICE_ID and posts both `servo.rotate` and
+# `display.set` to the same /v1/devices/{id}/commands endpoint.
+#
+# Verified on the bench rig: ESP32-C6 (QFN40) rev v0.0, 8 MB flash,
+# /dev/cu.usbmodem3101, ESP-IDF v5.3.2.
+
+name: "posthog-bell-counter-c6"
+version: "1.0.0"
+target: "esp32c6"
+description: "PostHog bell counter — hobby servo bell striker (GPIO3) + MAX7219 4-module LED panel (DIN=10, CLK=8, CS=9); commanded entirely from the network, no startup animation"
+
+# Driver order matters. `display` is listed first so the panel is initialised
+# and blanked before the servo takes its home position — otherwise the first
+# thing on the bench is a servo twitch against a garbage panel.
+drivers:
+  - name: display
+    instance: "display"
+    config:
+      pin_din: 10
+      pin_clk: 8
+      pin_cs: 9
+      num_modules: 4
+      # 0 is the dimmest usable setting; the panel is a foot from the camera.
+      brightness: 1
+
+  - name: servo
+    instance: "servo"
+    config:
+      pin: 3
+      ledc_channel: 0
+      min_pulse_us: 500
+      max_pulse_us: 2500
+      max_angle: 180
+      # home_angle IS the bell's rest position, and it is the position
+      # `servo.rotate` returns to after its hold. It must match the service's
+      # BELL_REST_ANGLE (default 90) — the firmware owns the "back" half of the
+      # out-and-back swing, the service only asks for the "out" half.
+      home_angle: 90
+      # Drop the PWM ~500 ms after the swing finishes. Without this the horn
+      # hums and jitters against the bell between strikes, which the microphone
+      # picks up even when the servo is nominally still.
+      idle_detach: true
+
+defaults:
+  heartbeat_interval: 60
+  report_metrics:
+    - "servo.angle"
+    - "system.rssi"
+
+mqtt:
+  keepalive: 60
+  qos: 1
+  # Commands issued while the device is briefly offline are still delivered
+  # once it reconnects, so a strike is not silently dropped mid-demo.
+  buffer_on_disconnect: true
+  max_buffer_size: 20
+
+power:
+  deep_sleep: false
+  sleep_duration: null
+  wake_on_pin: null
+
+hardware:
+  has_battery: false
+  battery_adc_pin: -1
+  battery_voltage_divider: 1.0
+  status_led_pin: -1

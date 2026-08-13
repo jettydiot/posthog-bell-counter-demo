@@ -1,0 +1,31 @@
+{
+  "name": "posthog-bell-counter-demo",
+  "version": "1.0.0",
+  "description": "Ring a physical bell and show the authoritative PostHog device_claimed count on a Jettyd-managed ESP32-C6",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=20.6"
+  },
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "test": "node --test test/*.test.js",
+    "test:watch": "node --test --watch test/*.test.js"
+  },
+  "dependencies": {},
+  "devDependencies": {},
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jettydiot/posthog-bell-counter-demo.git"
+  },
+  "keywords": [
+    "posthog",
+    "jettyd",
+    "iot",
+    "esp32-c6",
+    "webhook",
+    "max7219",
+    "servo"
+  ]
+}

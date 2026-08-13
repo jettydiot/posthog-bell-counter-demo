@@ -1,0 +1,51 @@
+# docker compose up --build
+#
+# Secrets come from a local .env file (see .env.example) and are passed as
+# environment variables. Nothing is baked into the image and no volume is
+# mounted — the service is stateless by design, because the count lives in
+# PostHog rather than here.
+
+services:
+  bell-counter:
+    build: .
+    image: posthog-bell-counter-demo:local
+    container_name: posthog-bell-counter
+    restart: unless-stopped
+
+    env_file:
+      - .env
+
+    environment:
+      # Bind inside the container; publish below to control external exposure.
+      HOST: 0.0.0.0
+      PORT: 3000
+
+    ports:
+      # Loopback only. Put a TLS-terminating reverse proxy or a tunnel in front
+      # before letting PostHog reach this — the shared secret travels in a
+      # header, so plaintext HTTP over the internet gives it away.
+      - "127.0.0.1:3000:3000"
+
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:3000/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+    # Nothing here writes to disk, so take the filesystem away.
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

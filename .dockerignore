@@ -1,0 +1,25 @@
+# Keep the build context to the source that actually ships.
+.git
+.github
+node_modules
+test
+firmware
+docs
+
+# Never let a real .env near the build context — it would end up in a layer.
+.env
+.env.*
+!.env.example
+
+*.md
+!README.md
+LICENSE
+Dockerfile
+.dockerignore
+docker-compose.yml
+docker-compose.*.yml
+
+npm-debug.log*
+.DS_Store
+coverage
+*.tgz
