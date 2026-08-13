@@ -1,0 +1,199 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# A newer push to the same branch makes the older run irrelevant.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: tests (node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 20.6 is the floor declared in package.json; 22 is the version the
+        # Docker image ships. Both are tested so neither can drift unnoticed.
+        node: ['20.x', '22.x']
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      # No dependencies to install — the whole point of the zero-dependency
+      # design. This step exists to prove that stays true.
+      - name: Assert the dependency tree is empty
+        run: |
+          node -e "
+            const pkg = require('./package.json');
+            const deps = Object.keys(pkg.dependencies ?? {});
+            const dev = Object.keys(pkg.devDependencies ?? {});
+            if (deps.length || dev.length) {
+              console.error('expected zero dependencies, found:', [...deps, ...dev].join(', '));
+              process.exit(1);
+            }
+            console.log('dependency tree is empty');
+          "
+
+      - name: Run tests
+        run: npm test
+
+  secrets-scan:
+    name: no secrets committed
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Reject committed .env files
+        run: |
+          tracked=$(git ls-files | grep -E '^\.env($|\.)' | grep -vx '\.env\.example' || true)
+          if [ -n "$tracked" ]; then
+            echo "::error::a .env file is tracked — remove it and rotate the secrets:"
+            echo "$tracked"
+            exit 1
+          fi
+          echo "no tracked .env files"
+
+      - name: Reject obvious credential literals
+        run: |
+          # PostHog personal API keys (phx_/phc_) and Jettyd fleet/device keys.
+          # .env.example is exempt: it holds names, not values.
+          matches=$(git grep -nIE '(phx_|phc_)[A-Za-z0-9]{20,}|ft_[A-Za-z0-9]{20,}|dk_[A-Za-z0-9]{20,}' \
+            -- . ':!.env.example' ':!.github/workflows/ci.yml' || true)
+          if [ -n "$matches" ]; then
+            echo "::error::possible credential committed:"
+            echo "$matches"
+            exit 1
+          fi
+          echo "no credential literals found"
+
+  docker:
+    name: docker image
+    runs-on: ubuntu-latest
+    # secrets-scan as well as test: the Dockerfile COPYs src, and
+    # cache-to: type=gha,mode=max exports the intermediate layers. Gated on test
+    # alone, a credential in src could reach the Actions cache before the scan
+    # that would have caught it has even finished.
+    needs: [test, secrets-scan]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: posthog-bell-counter-demo:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # A build that succeeds but cannot boot is not a passing build. Start the
+      # container with throwaway config and require a healthy /healthz.
+      - name: Boot the container and probe /healthz
+        run: |
+          docker run -d --name bell-ci -p 3000:3000 \
+            -e WEBHOOK_SECRET=ci-secret-value-at-least-16 \
+            -e JETTYD_BASE_URL=https://api.jettyd.invalid \
+            -e JETTYD_API_TOKEN=ci-token \
+            -e JETTYD_DEVICE_ID=00000000-0000-0000-0000-000000000000 \
+            -e POSTHOG_API_KEY=ci-key \
+            -e POSTHOG_PROJECT_IDS=100001,100002,100003 \
+            -e RECONCILE_INTERVAL_MINUTES=0 \
+            posthog-bell-counter-demo:ci
+
+          for attempt in $(seq 1 20); do
+            if curl -fsS http://127.0.0.1:3000/healthz > /tmp/health.json; then
+              echo "healthy after ${attempt} attempt(s)"
+              cat /tmp/health.json
+              exit 0
+            fi
+            sleep 1
+          done
+
+          echo "::error::container never became healthy"
+          docker logs bell-ci
+          exit 1
+
+      - name: Assert the webhook rejects a bad secret
+        run: |
+          status=$(curl -s -o /dev/null -w '%{http_code}' \
+            -X POST http://127.0.0.1:3000/webhook/posthog \
+            -H 'x-webhook-secret: wrong' \
+            -d '{"event":"device_claimed"}')
+          if [ "$status" != "401" ]; then
+            echo "::error::expected 401 from an unauthenticated webhook, got $status"
+            exit 1
+          fi
+          echo "unauthenticated webhook correctly rejected"
+
+      # The run behind this ack cannot succeed here — the hosts are .invalid —
+      # but the ack must not wait to find that out. Anything slower than an
+      # immediate answer is the bug that makes PostHog retry and ring twice.
+      - name: Assert an authenticated webhook is acknowledged immediately
+        run: |
+          status=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 \
+            -X POST http://127.0.0.1:3000/webhook/posthog \
+            -H 'x-webhook-secret: ci-secret-value-at-least-16' \
+            -H 'Content-Type: application/json' \
+            -d '{"event":"device_claimed"}')
+          if [ "$status" != "202" ]; then
+            echo "::error::expected 202 from an accepted webhook, got $status"
+            exit 1
+          fi
+          echo "webhook acknowledged with 202 without waiting for the run"
+
+      # The container runs with RECONCILE_INTERVAL_MINUTES=0, which is exactly
+      # the case where the boot paint is the *only* thing that clears a stale
+      # panel — there is no later tick to do it. It must run anyway.
+      - name: Assert the boot reconcile runs with the scheduler disabled
+        run: |
+          if ! docker logs bell-ci 2>&1 | grep -q '"event":"reconcile.disabled"'; then
+            echo "::error::expected the scheduler to be disabled in this container"
+            docker logs bell-ci
+            exit 1
+          fi
+          if ! docker logs bell-ci 2>&1 | grep -q '"trigger":"startup"'; then
+            echo "::error::the boot reconcile did not run with the scheduler disabled"
+            docker logs bell-ci
+            exit 1
+          fi
+          echo "boot reconcile ran despite periodic reconciliation being off"
+
+      - name: Assert the public health probe leaks no deployment identifiers
+        run: |
+          body=$(curl -fsS http://127.0.0.1:3000/healthz)
+          for field in device_id jettyd_base_url posthog_projects posthog_event; do
+            if printf '%s' "$body" | grep -q "\"$field\""; then
+              echo "::error::/healthz exposes $field to an unauthenticated caller"
+              printf '%s\n' "$body"
+              exit 1
+            fi
+          done
+          echo "public /healthz body carries no deployment identifiers"
+
+          authed=$(curl -fsS http://127.0.0.1:3000/healthz \
+            -H 'x-webhook-secret: ci-secret-value-at-least-16')
+          if ! printf '%s' "$authed" | grep -q '"device_id"'; then
+            echo "::error::authenticated /healthz should still describe the deployment"
+            printf '%s\n' "$authed"
+            exit 1
+          fi
+          echo "authenticated /healthz still reports the configuration"
+
+      - name: Container logs
+        if: always()
+        run: docker logs bell-ci || true
