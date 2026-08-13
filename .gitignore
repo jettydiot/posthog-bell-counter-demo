@@ -1,0 +1,19 @@
+# Secrets — never commit a real one.
+.env
+.env.*
+!.env.example
+
+node_modules/
+npm-debug.log*
+coverage/
+*.tgz
+
+# ESP-IDF build output, if you build the firmware in place.
+build/
+sdkconfig
+sdkconfig.old
+managed_components/
+
+.DS_Store
+.idea/
+.vscode/
