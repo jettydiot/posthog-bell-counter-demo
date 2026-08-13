@@ -18,13 +18,16 @@ export function createLogger({
 
   function emit(levelName, event, fields = {}) {
     if (LEVELS[levelName] < threshold) return;
+    // The reserved keys go *after* the spreads. Consumers filter on `event` and
+    // `level`, so a caller field of the same name — a PostHog payload carries
+    // its own `event`, for one — would otherwise make the line unfindable.
     sink(
       JSON.stringify({
+        ...bindings,
+        ...fields,
         ts: now().toISOString(),
         level: levelName,
         event,
-        ...bindings,
-        ...fields,
       }),
     );
   }

@@ -44,8 +44,18 @@ export function createJettydClient(config, { fetch: fetchImpl, logger }) {
       throw new JettydCommandError(commandType, response.status, detail);
     }
 
+    // Nothing reads the body of an accepted command, but an unread body pins the
+    // connection open until the timeout fires. Release it, and hand callers a
+    // plain result rather than a live Response they would have to remember to
+    // drain themselves.
+    try {
+      await response.body?.cancel();
+    } catch {
+      // A body that will not cancel is not worth failing an accepted command for.
+    }
+
     logger.debug('jettyd.command_accepted', { command_type: commandType, payload });
-    return response;
+    return { status: response.status };
   }
 
   return {

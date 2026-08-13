@@ -58,12 +58,13 @@ function main() {
   });
 
   // Paint the panel once at boot so a restart does not leave a stale number up
-  // until the first webhook or the first tick.
-  if (scheduler.enabled) {
-    runner
-      .reconcile('startup')
-      .catch((err) => logger.error('reconcile.error', { error: String(err?.message ?? err) }));
-  }
+  // until the first webhook or the first tick. Deliberately not gated on
+  // `scheduler.enabled`: with periodic reconciliation switched off there is no
+  // later tick at all, which makes the boot paint the *only* thing that clears
+  // a stale panel before the next claim.
+  runner
+    .reconcile('startup')
+    .catch((err) => logger.error('reconcile.error', { error: String(err?.message ?? err) }));
 
   for (const signal of ['SIGTERM', 'SIGINT']) {
     process.on(signal, () => {

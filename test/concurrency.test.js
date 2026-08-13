@@ -158,20 +158,20 @@ describe('concurrent webhooks are serialised', () => {
 
     assert.deepEqual(fetchImpl.kinds(), [
       'jettyd:servo.rotate',
-      'posthog:131280',
-      'posthog:214227',
-      'posthog:218818',
+      'posthog:100001',
+      'posthog:100002',
+      'posthog:100003',
       'jettyd:display.set',
       'jettyd:servo.rotate',
-      'posthog:131280',
-      'posthog:214227',
-      'posthog:218818',
+      'posthog:100001',
+      'posthog:100002',
+      'posthog:100003',
       'jettyd:display.set',
     ]);
   });
 
   it('runs sequentially awaited webhooks one apiece — no coalescing', async () => {
-    const fetchImpl = mockFetch(posthogCounts({ 131280: 1, 214227: 1, 218818: 1 }));
+    const fetchImpl = mockFetch(posthogCounts({ 100001: 1, 100002: 1, 100003: 1 }));
     const { runner } = buildRunner(fetchImpl);
 
     await runner.trigger('webhook');
@@ -213,8 +213,7 @@ describe('reconciliation does not interleave with a strike', () => {
     await settle(fetchImpl);
     await Promise.all([bellRun, reconcileRun]);
 
-    const kinds = fetchImpl.kinds();
-    assert.equal(kinds.indexOf('jettyd:display.set') < kinds.lastIndexOf('jettyd:display.set'), true);
+    assert.equal(fetchImpl.displays(), 2, 'the bell run and the reconcile each write the display');
     assert.equal(fetchImpl.strikes(), 1, 'reconcile must not ring the bell');
   });
 

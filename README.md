@@ -15,7 +15,7 @@ webhook on `device_claimed`; the number is whatever PostHog says the number is.
                                    │                             │
                                    │   1. servo.rotate ──────────┼──┐
   PostHog  ◄─── HogQL query ───────┤   2. count = Σ projects     │  │
-  (131280, 214227, 218818)         │   3. display.set ───────────┼──┤
+  (POSTHOG_PROJECT_IDS)            │   3. display.set ───────────┼──┤
                                    │                             │  │
                                    └─────────────────────────────┘  │
                                                                     ▼
@@ -75,11 +75,28 @@ runs:       │ ─── A ───────── B ─── │      5 w
                  run for #1   one run covering #2–#5
 ```
 
-Requests 2–5 all wait on the same follow-up run and are told, in the response,
-how many requests it covered (`coalesced_requests`). Scheduled reconciliation
+Requests 2–5 all fold into the same follow-up run. Scheduled reconciliation
 queues behind an in-flight strike rather than interleaving with it, so a
 `display.set` can never land in the middle of somebody else's chain. If a
 reconcile is already queued, the next one is skipped rather than stacked.
+
+### The webhook answers before the run
+
+A delivery is acknowledged with **`202 Accepted`** immediately, and the run
+happens after the response is sent.
+
+This is what keeps coalescing meaningful. A run is a servo strike plus one
+PostHog query per project, each allowed `REQUEST_TIMEOUT_MS`; answering only
+once it finished put the response inside PostHog's delivery-timeout window, and
+PostHog answers a timeout by retrying. A retry landing *after* the first run
+completed is not concurrent with anything, so the runner has nothing to coalesce
+it with — it is simply a second strike for a single claim. Acknowledging first
+takes the response time out of the equation entirely.
+
+The trade is that the acknowledgement cannot report the outcome, because there
+isn't one yet. It carries no run id either: a coalesced delivery never gets its
+own run, so there would be nothing honest to put there. The outcome shows up in
+the `webhook.run_settled` log line and in `/healthz` `last_run`.
 
 ## Reconciliation
 
@@ -116,7 +133,7 @@ every problem at once.
 | `JETTYD_DEVICE_ID` | ✅ | — | The **one** combined device — servo and panel both |
 | `POSTHOG_API_KEY` | ✅ | — | Personal API key with the `query:read` scope |
 | `POSTHOG_HOST` | | `eu.posthog.com` | PostHog instance |
-| `POSTHOG_PROJECT_IDS` | | `131280,214227,218818` | Projects to sum |
+| `POSTHOG_PROJECT_IDS` | ✅ | — | Comma-separated project ids to sum. No default — this repository is public, and a default would mean shipping someone's real project ids in the source |
 | `POSTHOG_EVENT` | | `device_claimed` | Event to count |
 | `BELL_REST_ANGLE` | | `90` | Rest position; **must match `home_angle`** in `firmware/device.yaml` |
 | `BELL_STRIKE_ANGLE` | | `45` | Strike position |
@@ -135,7 +152,8 @@ and `/healthz` will describe a rest position the hardware does not use.
 ## PostHog setup
 
 1. **Personal API key.** Settings → Personal API keys → create one scoped to
-   `query:read` for the three projects. Put it in `POSTHOG_API_KEY`.
+   `query:read` for every project you are counting. Put it in
+   `POSTHOG_API_KEY`, and list the project ids in `POSTHOG_PROJECT_IDS`.
 2. **Webhook destination.** In each project: Data pipelines → Destinations → new
    **Webhook**.
    - URL: `https://<your-host>/webhook/posthog`
@@ -149,6 +167,9 @@ and `/healthz` will describe a rest position the hardware does not use.
      -H 'Content-Type: application/json' \
      -d '{"event":"device_claimed"}'
    ```
+
+That returns `202 {"accepted":true}` straight away; watch the logs or
+`/healthz` for what the run did.
 
 The service does not filter on the event name — the destination's own filter
 does that. Any authenticated POST rings the bell and repaints the panel, which
@@ -252,8 +273,6 @@ curl -s localhost:3000/healthz | jq
   "uptime_seconds": 3641,
   "busy": false,
   "reconcile_interval_minutes": 15,
-  "posthog_projects": ["131280", "214227", "218818"],
-  "device_id": "…",
   "bell": { "restAngle": 90, "strikeAngle": 45, "holdMs": 250 },
   "last_run": {
     "at": "2026-08-13T11:04:22.118Z",
@@ -269,7 +288,21 @@ curl -s localhost:3000/healthz | jq
 
 `status` is `degraded` when the last run failed. It is deliberately still
 HTTP 200 — the process is alive, PostHog is not, and a restart would not help.
-No authentication: it exposes no secrets, only names and counts.
+
+The probe needs no authentication, so its body is public if the service is.
+That is why it carries no deployment identifiers. Send the shared secret to get
+the descriptive fields as well — `device_id`, `jettyd_base_url`,
+`posthog_projects`, `posthog_event`, `posthog_host`:
+
+```bash
+curl -s localhost:3000/healthz -H "x-webhook-secret: $WEBHOOK_SECRET" | jq
+```
+
+None of those are credentials, but they are the inputs to the Jettyd command
+API and the PostHog query API, and an anonymous caller has no business being
+handed them. A wrong secret is not an error here — it just gets the short body.
+A liveness probe that starts returning 401 is how a healthy service gets
+restarted.
 
 ### Logs
 
@@ -280,14 +313,20 @@ gets you a run at a time.
 {"ts":"…","level":"info","event":"webhook.accepted","event_name":"device_claimed"}
 {"ts":"…","level":"info","event":"run.started","run_id":"run-7","kind":"bell","trigger":"webhook","requests":1}
 {"ts":"…","level":"info","event":"bell.rang","run_id":"run-7","angle":45,"rest_angle":90,"hold_ms":250}
-{"ts":"…","level":"info","event":"query.completed","run_id":"run-7","count":42,"per_project":{"131280":30,"214227":9,"218818":3}}
+{"ts":"…","level":"info","event":"query.completed","run_id":"run-7","count":42,"per_project":{"100001":30,"100002":9,"100003":3}}
 {"ts":"…","level":"info","event":"display.updated","run_id":"run-7","count":42}
 {"ts":"…","level":"info","event":"run.finished","run_id":"run-7","ok":true,"count":42,"duration_ms":812}
+{"ts":"…","level":"info","event":"webhook.run_settled","run_id":"run-7","ok":true,"count":42,"displayed":true,"coalesced_requests":1}
 ```
 
-Useful events: `webhook.rejected`, `run.coalesced`, `bell.failed`,
-`posthog.project_failed`, `query.failed`, `display.failed`,
+Useful events: `webhook.rejected`, `webhook.run_settled`, `run.coalesced`,
+`bell.failed`, `posthog.project_failed`, `query.failed`, `display.failed`,
 `reconcile.scheduled`, `reconcile.skipped`.
+
+`ts`, `level` and `event` are written last, so a caller field of the same name
+cannot capture them — a PostHog payload carries its own `event`, and a line
+whose `event` had been rewritten would be invisible to the very filter used to
+look for it.
 
 ## Security
 
@@ -323,12 +362,14 @@ so nothing is monkey-patched onto a global and every test is deterministic.
 | File | Covers |
 |---|---|
 | `ordering.test.js` | Strict servo → PostHog → display order; that no query starts before the strike has settled; that reconcile never rings |
-| `webhook-auth.test.js` | Valid secret accepted; wrong, missing, prefix and padded secrets rejected with no outbound calls; constant-time compare; the secret never echoed |
-| `posthog-aggregate.test.js` | Summing across all three projects; query shape; per-project endpoints; every all-or-nothing failure mode (non-2xx, connection error, bad shape, negative or non-numeric count) |
-| `runner-resilience.test.js` | Bell failure still queries and still displays; any project failure suppresses `display.set` entirely; display failure reported not swallowed |
+| `webhook-auth.test.js` | Valid secret accepted; wrong, missing, prefix and padded secrets rejected with no outbound calls; constant-time compare; the secret never echoed; the 256 KiB body cap |
+| `webhook-ack.test.js` | 202 returned while the strike is still in flight; the run completes afterwards; the outcome reaches the logs and `/healthz`; a burst still coalesces |
+| `http-timeout.test.js` | The request deadline stays live through the response body read, so a stalled body cannot pin a run open |
+| `posthog-aggregate.test.js` | Summing across every configured project; query shape; per-project endpoints; every all-or-nothing failure mode (non-2xx, connection error, bad shape, negative or non-numeric count) |
+| `runner-resilience.test.js` | Bell failure still queries and still displays; any project failure suppresses `display.set` entirely; display failure reported not swallowed; every path — including the internal fallback and a skipped reconcile — produces the same result shape |
 | `concurrency.test.js` | Never two strikes in flight; a burst of five coalesces to two runs; each run's chain stays contiguous; reconcile queues behind a strike and is skipped rather than stacked |
 | `command-payloads.test.js` | The exact `servo.rotate` and `display.set` envelopes, headers, and that both go to the same device URL |
-| `scheduler.test.js` | 15-minute default; configured override; `0` disables; ticks reconcile; a failing tick does not kill the timer |
+| `scheduler.test.js` | 15-minute default; configured override; `0` disables; ticks reconcile; a failing tick does not kill the timer; a tick never calls `trigger()` |
 | `no-local-increment.test.js` | The same PostHog answer twice displays the same number twice; the count follows PostHog downwards; no counter file and no local increment in the source |
 | `config.test.js` | Required variables, defaults, validation, and that the redacted summary holds no secrets |
 | `health.test.js` | Shape, `degraded` state, no secrets in the body |

@@ -17,7 +17,7 @@ import {
 
 function buildHandler(overrides = {}) {
   const config = testConfig(overrides.env);
-  const fetchImpl = overrides.fetch ?? mockFetch(posthogCounts({ 131280: 1, 214227: 1, 218818: 1 }));
+  const fetchImpl = overrides.fetch ?? mockFetch(posthogCounts({ 100001: 1, 100002: 1, 100003: 1 }));
   const { logger, records } = captureLogger();
   const deps = { fetch: fetchImpl, logger };
   const runner = createBellRunner({
@@ -26,8 +26,22 @@ function buildHandler(overrides = {}) {
     posthog: createPostHogClient(config, deps),
     logger,
   });
-  const handler = createRequestHandler({ config, runner, logger, startedAt: Date.now() });
-  return { handler, fetchImpl, records, runner, config };
+
+  // The handler answers 202 and runs afterwards, so a test that wants to assert
+  // on what the run *did* has to wait for it. Capturing the promise the handler
+  // itself creates keeps that wait exact — no polling, no arbitrary flushes.
+  const runs = [];
+  const spy = {
+    ...runner,
+    trigger: (reason) => {
+      const run = runner.trigger(reason);
+      runs.push(run);
+      return run;
+    },
+  };
+
+  const handler = createRequestHandler({ config, runner: spy, logger, startedAt: Date.now() });
+  return { handler, fetchImpl, records, runner: spy, config, settle: () => Promise.all(runs) };
 }
 
 async function post(handler, headers, body = '{"event":"device_claimed"}') {
@@ -38,10 +52,11 @@ async function post(handler, headers, body = '{"event":"device_claimed"}') {
 
 describe('webhook authentication', () => {
   it('accepts a request carrying the correct shared secret', async () => {
-    const { handler, fetchImpl } = buildHandler();
+    const { handler, fetchImpl, settle } = buildHandler();
     const res = await post(handler, { 'x-webhook-secret': 'test-webhook-secret' });
 
-    assert.equal(res.statusCode, 200);
+    assert.equal(res.statusCode, 202);
+    await settle();
     assert.ok(fetchImpl.kinds().includes('jettyd:servo.rotate'));
   });
 
@@ -123,6 +138,29 @@ describe('webhook authentication', () => {
 
     assert.equal(res.statusCode, 400);
     assert.deepEqual(fetchImpl.calls, []);
+  });
+
+  it('returns 413 for a body over the 256 KiB cap, without ringing', async () => {
+    const { handler, fetchImpl } = buildHandler();
+    const oversized = JSON.stringify({ event: 'device_claimed', pad: 'x'.repeat(1024 * 256) });
+    const res = await post(handler, { 'x-webhook-secret': 'test-webhook-secret' }, oversized);
+
+    assert.equal(res.statusCode, 413);
+    assert.deepEqual(fetchImpl.calls, [], 'an oversized delivery must never reach the hardware');
+  });
+
+  it('accepts a body that sits just under the cap', async () => {
+    const { handler, settle } = buildHandler();
+    // Proves the 413 above is the cap talking, not any large body failing.
+    const padding = 1024 * 256 - JSON.stringify({ event: 'device_claimed', pad: '' }).length;
+    const res = await post(
+      handler,
+      { 'x-webhook-secret': 'test-webhook-secret' },
+      JSON.stringify({ event: 'device_claimed', pad: 'x'.repeat(padding) }),
+    );
+
+    assert.equal(res.statusCode, 202);
+    await settle();
   });
 
   it('returns 404 for an unknown path', async () => {

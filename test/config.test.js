@@ -12,9 +12,27 @@ describe('loadConfig', () => {
     assert.equal(config.posthog.apiKey, 'phx_test_key');
   });
 
-  it('defaults the PostHog projects to the three demo projects', () => {
+  it('takes the PostHog projects from the environment', () => {
     const config = loadConfig(TEST_ENV);
-    assert.deepEqual(config.posthog.projectIds, ['131280', '214227', '218818']);
+    assert.deepEqual(config.posthog.projectIds, ['100001', '100002', '100003']);
+  });
+
+  it('has no built-in project ids — this repository is public', () => {
+    // A default here would ship the operator's real project ids in the source.
+    const err = catchSync(() => loadConfig({ ...TEST_ENV, POSTHOG_PROJECT_IDS: '' }), ConfigError);
+    assert.match(err.message, /POSTHOG_PROJECT_IDS is required/);
+    assert.equal(
+      err.problems.filter((p) => p.includes('POSTHOG_PROJECT_IDS')).length,
+      1,
+      'one missing variable should produce exactly one problem line',
+    );
+  });
+
+  it('rejects a non-numeric project id', () => {
+    assert.throws(
+      () => loadConfig({ ...TEST_ENV, POSTHOG_PROJECT_IDS: '100001,not-a-project' }),
+      ConfigError,
+    );
   });
 
   it('defaults the reconcile interval to 15 minutes', () => {
@@ -71,6 +89,7 @@ describe('loadConfig', () => {
       'JETTYD_API_TOKEN',
       'JETTYD_DEVICE_ID',
       'POSTHOG_API_KEY',
+      'POSTHOG_PROJECT_IDS',
     ]) {
       assert.match(err.message, new RegExp(key), `expected ${key} to be reported`);
     }

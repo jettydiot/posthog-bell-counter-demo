@@ -27,11 +27,19 @@ function fakeTimers() {
 
 function stubRunner() {
   const calls = [];
+  const triggers = [];
   return {
     calls,
+    triggers,
     reconcile: async (reason) => {
       calls.push(reason);
       return { ok: true, displayed: true, count: 1 };
+    },
+    // Present and spyable on purpose: asserting that a *missing* method was
+    // never called proves nothing about the scheduler.
+    trigger: async (reason) => {
+      triggers.push(reason);
+      return { ok: true, bell: { ok: true } };
     },
     stats: () => ({ busy: false }),
   };
@@ -97,7 +105,7 @@ describe('reconcile scheduler', () => {
     await timers.tick();
 
     assert.deepEqual(runner.calls, ['scheduler', 'scheduler']);
-    assert.equal(runner.trigger, undefined, 'the scheduler only needs reconcile()');
+    assert.deepEqual(runner.triggers, [], 'a tick is not a claim — the scheduler must never ring');
   });
 
   it('survives a failing reconcile and keeps the timer alive', async () => {

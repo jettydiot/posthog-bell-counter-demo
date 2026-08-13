@@ -26,16 +26,16 @@ function buildRunner(fetchImpl, config = testConfig()) {
 
 describe('strict ordering: servo → PostHog → display', () => {
   it('issues servo.rotate, then all project queries, then display.set', async () => {
-    const fetchImpl = mockFetch(posthogCounts({ 131280: 4, 214227: 3, 218818: 2 }));
+    const fetchImpl = mockFetch(posthogCounts({ 100001: 4, 100002: 3, 100003: 2 }));
     const { runner } = buildRunner(fetchImpl);
 
     await runner.trigger('webhook');
 
     assert.deepEqual(fetchImpl.kinds(), [
       'jettyd:servo.rotate',
-      'posthog:131280',
-      'posthog:214227',
-      'posthog:218818',
+      'posthog:100001',
+      'posthog:100002',
+      'posthog:100003',
       'jettyd:display.set',
     ]);
   });
@@ -73,7 +73,7 @@ describe('strict ordering: servo → PostHog → display', () => {
   });
 
   it('writes the display exactly once per run', async () => {
-    const fetchImpl = mockFetch(posthogCounts({ 131280: 1, 214227: 1, 218818: 1 }));
+    const fetchImpl = mockFetch(posthogCounts({ 100001: 1, 100002: 1, 100003: 1 }));
     const { runner } = buildRunner(fetchImpl);
 
     await runner.trigger('webhook');
@@ -83,15 +83,15 @@ describe('strict ordering: servo → PostHog → display', () => {
   });
 
   it('reconciliation queries then displays, and never rings the bell', async () => {
-    const fetchImpl = mockFetch(posthogCounts({ 131280: 5, 214227: 0, 218818: 0 }));
+    const fetchImpl = mockFetch(posthogCounts({ 100001: 5, 100002: 0, 100003: 0 }));
     const { runner } = buildRunner(fetchImpl);
 
     await runner.reconcile('scheduler');
 
     assert.deepEqual(fetchImpl.kinds(), [
-      'posthog:131280',
-      'posthog:214227',
-      'posthog:218818',
+      'posthog:100001',
+      'posthog:100002',
+      'posthog:100003',
       'jettyd:display.set',
     ]);
   });

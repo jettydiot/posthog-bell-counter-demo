@@ -58,7 +58,26 @@ export function createBellRunner({ config, jettyd, posthog, logger, clock = () =
           trigger: reason,
           why: 'a reconcile is already queued behind the running job',
         });
-        return Promise.resolve({ skipped: true, ok: true, reason });
+        // Same field set as every other result, so a caller never has to branch
+        // on which path produced it — but built with buildResult rather than
+        // finish, because nothing ran: overwriting `lastRun` here would erase
+        // the real last run from /healthz on behalf of a no-op.
+        return Promise.resolve({
+          ...buildResult(
+            { kind: 'reconcile', reason, requests: 1 },
+            {
+              runId: null,
+              startedAt: clock(),
+              bell: { attempted: false, ok: null, error: null },
+              count: null,
+              perProject: null,
+              displayed: false,
+              ok: true,
+              error: null,
+            },
+          ),
+          skipped: true,
+        });
       }
       const gate = deferred();
       pendingReconcile = {
@@ -90,19 +109,20 @@ export function createBellRunner({ config, jettyd, posthog, logger, clock = () =
           result = await runOnce(job);
         } catch (err) {
           // runOnce is written to be total; this is the last line of defence so
-          // a caller can never be left with an unresolved promise.
+          // a caller can never be left with an unresolved promise. It goes
+          // through finish() like every other outcome, so /healthz reports the
+          // run that just failed rather than the last one that worked.
           logger.error('run.unexpected_error', { error: String(err?.message ?? err) });
-          result = {
+          result = finish(job, {
             runId: null,
-            ok: false,
-            trigger: job.reason,
-            kind: job.kind,
-            coalesced: job.requests,
+            startedAt: clock(),
             bell: { attempted: job.kind === 'bell', ok: null, error: null },
             count: null,
+            perProject: null,
             displayed: false,
+            ok: false,
             error: { stage: 'internal', message: String(err?.message ?? err) },
-          };
+          });
         }
         job.resolve(result);
         job = nextJob();
@@ -211,8 +231,12 @@ export function createBellRunner({ config, jettyd, posthog, logger, clock = () =
     }
   }
 
-  function finish(job, outcome) {
-    const result = {
+  /**
+   * The one place a run result is shaped. Every field is always present, so no
+   * caller — /healthz included — has to guess which path produced the object.
+   */
+  function buildResult(job, outcome) {
+    return {
       runId: outcome.runId,
       kind: job.kind,
       trigger: job.reason,
@@ -226,6 +250,11 @@ export function createBellRunner({ config, jettyd, posthog, logger, clock = () =
       at: outcome.startedAt.toISOString(),
       durationMs: clock().getTime() - outcome.startedAt.getTime(),
     };
+  }
+
+  /** buildResult, plus the two side effects a run that actually happened has. */
+  function finish(job, outcome) {
+    const result = buildResult(job, outcome);
 
     lastRun = result;
     logger.info('run.finished', {

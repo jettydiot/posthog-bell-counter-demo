@@ -28,7 +28,11 @@ export function createRequestHandler({
       if (req.method !== 'GET' && req.method !== 'HEAD') {
         return send(res, 405, { error: 'method not allowed' });
       }
-      return send(res, 200, healthBody({ config, runner, startedAt, version, now }));
+      // A wrong secret is not an error here — this is a liveness probe, and a
+      // probe that starts 401ing gets a service restarted. It just narrows the
+      // body to the fields that are safe for an anonymous caller.
+      const detailed = authenticated(req, config);
+      return send(res, 200, healthBody({ config, runner, startedAt, version, now, detailed }));
     }
 
     if (path === WEBHOOK_PATH) {
@@ -42,13 +46,18 @@ export function createRequestHandler({
   };
 }
 
+/** Constant-time check of the shared secret header. */
+function authenticated(req, config) {
+  const provided = req.headers['x-webhook-secret'];
+  return safeCompare(typeof provided === 'string' ? provided : '', config.webhookSecret);
+}
+
 async function handleWebhook(req, res, { config, runner, logger }) {
   // Authenticate before reading the body: an unauthenticated caller should not
   // be able to make us buffer anything, and must never reach the hardware.
-  const provided = req.headers['x-webhook-secret'];
-  if (!safeCompare(typeof provided === 'string' ? provided : '', config.webhookSecret)) {
+  if (!authenticated(req, config)) {
     logger.warn('webhook.rejected', {
-      reason: provided ? 'secret mismatch' : 'secret missing',
+      reason: req.headers['x-webhook-secret'] ? 'secret mismatch' : 'secret missing',
       remote: req.socket?.remoteAddress ?? null,
     });
     return send(res, 401, { error: 'unauthorized' });
@@ -78,34 +87,45 @@ async function handleWebhook(req, res, { config, runner, logger }) {
     bytes: raw.length,
   });
 
-  const result = await runner.trigger('webhook');
+  // Acknowledge the delivery, *then* run. A run is a servo strike plus one
+  // PostHog query per project, each allowed REQUEST_TIMEOUT_MS; holding the
+  // response open for all of that can outlast PostHog's delivery timeout, and
+  // PostHog answers a timeout with a retry. A retry that lands after the first
+  // run finished is not coalesced — it is a second strike for one claim.
+  //
+  // No run id in the ack: a coalesced delivery does not get its own run, so
+  // there is nothing honest to return here. The outcome shows up in the logs
+  // below and in /healthz `last_run`.
+  send(res, 202, { accepted: true });
 
-  return send(res, 200, {
-    ok: result.ok,
-    run_id: result.runId,
-    coalesced_requests: result.coalesced,
-    bell: result.bell,
-    count: result.count,
-    displayed: result.displayed,
-    error: result.error,
-  });
+  runner
+    .trigger('webhook')
+    .then((result) =>
+      logger.info('webhook.run_settled', {
+        run_id: result.runId,
+        ok: result.ok,
+        coalesced_requests: result.coalesced,
+        bell_ok: result.bell.ok,
+        count: result.count,
+        displayed: result.displayed,
+        error: result.error,
+      }),
+    )
+    .catch((err) => logger.error('webhook.run_error', { error: String(err?.message ?? err) }));
+
+  return undefined;
 }
 
-function healthBody({ config, runner, startedAt, version, now }) {
+function healthBody({ config, runner, startedAt, version, now, detailed = false }) {
   const { busy, lastRun } = runner.stats();
   const summary = config.redactedSummary();
 
-  return {
+  const body = {
     status: lastRun && !lastRun.ok ? 'degraded' : 'ok',
     version,
     uptime_seconds: Math.floor((now() - startedAt) / 1000),
     busy,
     reconcile_interval_minutes: summary.reconcile_interval_minutes,
-    posthog_host: summary.posthog_host,
-    posthog_projects: summary.posthog_projects,
-    posthog_event: summary.posthog_event,
-    jettyd_base_url: summary.jettyd_base_url,
-    device_id: summary.device_id,
     bell: summary.bell,
     last_run: lastRun
       ? {
@@ -121,6 +141,21 @@ function healthBody({ config, runner, startedAt, version, now }) {
           error: lastRun.error,
         }
       : null,
+  };
+
+  if (!detailed) return body;
+
+  // Behind the shared secret. None of these are credentials, but they are the
+  // inputs to the command API and to the PostHog query API — an anonymous
+  // caller on a service exposed to the internet should not be handed the device
+  // id and the project ids for free.
+  return {
+    ...body,
+    posthog_host: summary.posthog_host,
+    posthog_projects: summary.posthog_projects,
+    posthog_event: summary.posthog_event,
+    jettyd_base_url: summary.jettyd_base_url,
+    device_id: summary.device_id,
   };
 }
 

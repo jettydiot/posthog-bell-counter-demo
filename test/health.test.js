@@ -15,7 +15,7 @@ import {
   testConfig,
 } from './helpers.js';
 
-function buildHandler(fetchImpl = mockFetch(posthogCounts({ 131280: 4, 214227: 3, 218818: 2 }))) {
+function buildHandler(fetchImpl = mockFetch(posthogCounts({ 100001: 4, 100002: 3, 100003: 2 }))) {
   const config = testConfig();
   const { logger } = captureLogger();
   const deps = { fetch: fetchImpl, logger };
@@ -35,11 +35,13 @@ function buildHandler(fetchImpl = mockFetch(posthogCounts({ 131280: 4, 214227: 3
   return { handler, runner, fetchImpl };
 }
 
-async function get(handler, path = '/healthz') {
+async function get(handler, path = '/healthz', headers = {}) {
   const res = new MockResponse();
-  await handler(buildRequest('GET', path, {}), res);
+  await handler(buildRequest('GET', path, headers), res);
   return res;
 }
+
+const AUTHED = { 'x-webhook-secret': 'test-webhook-secret' };
 
 describe('health endpoint', () => {
   it('answers 200 with a JSON body', async () => {
@@ -66,11 +68,11 @@ describe('health endpoint', () => {
     assert.equal(body.reconcile_interval_minutes, 15);
   });
 
-  it('reports the configuration without ever exposing a secret', async () => {
+  it('reports the configuration to an authenticated caller, never a secret', async () => {
     const { handler } = buildHandler();
-    const res = await get(handler);
+    const res = await get(handler, '/healthz', AUTHED);
 
-    assert.deepEqual(res.json().posthog_projects, ['131280', '214227', '218818']);
+    assert.deepEqual(res.json().posthog_projects, ['100001', '100002', '100003']);
     assert.doesNotMatch(res.body, /test-webhook-secret|jettyd-token-abc|phx_test_key/);
   });
 
@@ -91,7 +93,7 @@ describe('health endpoint', () => {
   });
 
   it('surfaces a degraded state after a failed run', async () => {
-    const fetchImpl = mockFetch({ 'posthog:214227': jsonResponse(500, {}) });
+    const fetchImpl = mockFetch({ 'posthog:100002': jsonResponse(500, {}) });
     const { handler, runner } = buildHandler(fetchImpl);
     await runner.trigger('webhook');
 
@@ -112,5 +114,69 @@ describe('health endpoint', () => {
   it('is also served at /health', async () => {
     const { handler } = buildHandler();
     assert.equal((await get(handler, '/health')).statusCode, 200);
+  });
+});
+
+/**
+ * The probe is unauthenticated by design, which means anything in its body is
+ * public if the service is. The device id and the project ids are the inputs to
+ * the Jettyd command API and the PostHog query API, so they are not free to
+ * hand out to an anonymous caller.
+ */
+describe('health endpoint — what an anonymous caller is told', () => {
+  const IDENTIFIERS = ['device_id', 'jettyd_base_url', 'posthog_projects', 'posthog_event', 'posthog_host'];
+
+  it('omits every deployment identifier without the shared secret', async () => {
+    const { handler } = buildHandler();
+    const body = (await get(handler)).json();
+
+    for (const key of IDENTIFIERS) {
+      assert.equal(key in body, false, `${key} must not be served to an anonymous caller`);
+    }
+  });
+
+  it('still answers the liveness question anonymously', async () => {
+    const { handler } = buildHandler();
+    const body = (await get(handler)).json();
+
+    assert.equal(body.status, 'ok');
+    assert.equal(body.busy, false);
+    assert.ok('uptime_seconds' in body);
+    assert.ok('version' in body);
+    assert.ok('last_run' in body);
+  });
+
+  it('adds the identifiers once the caller presents the secret', async () => {
+    const { handler } = buildHandler();
+    const body = (await get(handler, '/healthz', AUTHED)).json();
+
+    for (const key of IDENTIFIERS) {
+      assert.equal(key in body, true, `${key} should be visible to an authenticated caller`);
+    }
+    assert.equal(body.device_id, '11111111-2222-3333-4444-555555555555');
+  });
+
+  it('treats a wrong secret as anonymous rather than as an error', async () => {
+    // 401ing a liveness probe is how a healthy service gets restarted.
+    const { handler } = buildHandler();
+    const res = await get(handler, '/healthz', { 'x-webhook-secret': 'wrong' });
+
+    assert.equal(res.statusCode, 200);
+    assert.equal('device_id' in res.json(), false);
+  });
+
+  it('applies the same rule at /health', async () => {
+    const { handler } = buildHandler();
+
+    assert.equal('device_id' in (await get(handler, '/health')).json(), false);
+    assert.equal('device_id' in (await get(handler, '/health', AUTHED)).json(), true);
+  });
+
+  it('leaks no identifier through the response text itself', async () => {
+    const { handler } = buildHandler();
+    const res = await get(handler);
+
+    assert.doesNotMatch(res.body, /11111111-2222-3333-4444-555555555555/);
+    assert.doesNotMatch(res.body, /100001|100002|100003/);
   });
 });

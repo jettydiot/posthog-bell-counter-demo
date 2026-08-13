@@ -41,8 +41,18 @@ static const char *TAG = "bell";
 #define DISPLAY_INSTANCE "display"
 #define SERVO_INSTANCE   "servo"
 
-/* Shown until the first display.set arrives. Chosen because the driver already
- * renders negative numbers as "----", so idle and "no reading" look alike. */
+/* Shown until the first display.set arrives.
+ *
+ * Sent as a JSON *string*, which is the driver's documented contract:
+ * drivers/display/display.c takes `{"value": <string|number>}` and branches on
+ * the first non-space character after `"value":` — a quote takes the string
+ * path (truncated at 5 chars), a digit or '-' takes the numeric path. So
+ * "----" is accepted directly and rendered literally.
+ *
+ * The numeric spelling `{"value":-1}` reaches the same four dashes by way of
+ * compact_number()'s negative branch, but only as a side effect of a rule about
+ * out-of-range counts. This panel is showing "no reading yet", not "minus one",
+ * so it says so directly rather than relying on that coincidence. */
 #define IDLE_PLACEHOLDER "----"
 
 /**

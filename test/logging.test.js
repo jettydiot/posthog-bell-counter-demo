@@ -56,6 +56,31 @@ describe('logger', () => {
     assert.equal(record.run_id, 'run-9');
     assert.equal(record.event, 'run.started');
   });
+
+  it('will not let a caller field overwrite a reserved key', () => {
+    // Consumers filter on `event` and `level`. A field that captured either one
+    // would make the line unfindable by exactly the query used to find it.
+    const lines = [];
+    const logger = createLogger({ level: 'debug', sink: (line) => lines.push(line) });
+
+    logger.warn('webhook.accepted', { event: 'device_claimed', level: 'debug', ts: 'nonsense' });
+
+    const record = JSON.parse(lines[0]);
+    assert.equal(record.event, 'webhook.accepted');
+    assert.equal(record.level, 'warn');
+    assert.ok(Date.parse(record.ts), 'ts must still be a real timestamp');
+  });
+
+  it('will not let a child binding overwrite a reserved key either', () => {
+    const lines = [];
+    const logger = createLogger({ level: 'debug', sink: (line) => lines.push(line) });
+
+    logger.child({ event: 'bound', level: 'error' }).info('run.started');
+
+    const record = JSON.parse(lines[0]);
+    assert.equal(record.event, 'run.started');
+    assert.equal(record.level, 'info');
+  });
 });
 
 describe('run logs are useful enough to debug from', () => {
@@ -73,7 +98,7 @@ describe('run logs are useful enough to debug from', () => {
   }
 
   it('records the whole chain, correlated by run_id', async () => {
-    const fetchImpl = mockFetch(posthogCounts({ 131280: 30, 214227: 9, 218818: 3 }));
+    const fetchImpl = mockFetch(posthogCounts({ 100001: 30, 100002: 9, 100003: 3 }));
     const { runner, records } = buildRunner(fetchImpl);
 
     await runner.trigger('webhook');
@@ -93,28 +118,28 @@ describe('run logs are useful enough to debug from', () => {
   });
 
   it('logs the per-project breakdown, which is what a wrong total is diagnosed from', async () => {
-    const fetchImpl = mockFetch(posthogCounts({ 131280: 30, 214227: 9, 218818: 3 }));
+    const fetchImpl = mockFetch(posthogCounts({ 100001: 30, 100002: 9, 100003: 3 }));
     const { runner, records } = buildRunner(fetchImpl);
 
     await runner.trigger('webhook');
 
     const [completed] = records.filter((r) => r.event === 'query.completed');
-    assert.deepEqual(completed.per_project, { 131280: 30, 214227: 9, 218818: 3 });
+    assert.deepEqual(completed.per_project, { 100001: 30, 100002: 9, 100003: 3 });
     assert.equal(completed.count, 42);
   });
 
   it('names the failing project and says what it cost', async () => {
-    const fetchImpl = mockFetch({ 'posthog:214227': jsonResponse(503, {}) });
+    const fetchImpl = mockFetch({ 'posthog:100002': jsonResponse(503, {}) });
     const { runner, records } = buildRunner(fetchImpl);
 
     await runner.trigger('webhook');
 
     const [failed] = records.filter((r) => r.event === 'query.failed');
-    assert.deepEqual(failed.failed_projects, ['214227']);
+    assert.deepEqual(failed.failed_projects, ['100002']);
     assert.match(failed.consequence, /display left unchanged/);
 
     const [project] = records.filter((r) => r.event === 'posthog.project_failed');
-    assert.equal(project.project_id, '214227');
+    assert.equal(project.project_id, '100002');
     assert.match(project.error, /503/);
   });
 
@@ -124,7 +149,7 @@ describe('run logs are useful enough to debug from', () => {
     // impossible to filter on.
     const config = testConfig();
     const { logger, records } = captureLogger();
-    const fetchImpl = mockFetch(posthogCounts({ 131280: 1, 214227: 0, 218818: 0 }));
+    const fetchImpl = mockFetch(posthogCounts({ 100001: 1, 100002: 0, 100003: 0 }));
     const deps = { fetch: fetchImpl, logger };
     const runner = createBellRunner({
       config,
@@ -132,7 +157,15 @@ describe('run logs are useful enough to debug from', () => {
       posthog: createPostHogClient(config, deps),
       logger,
     });
-    const handler = createRequestHandler({ config, runner, logger, startedAt: Date.now() });
+    // The handler answers 202 and runs afterwards; hold the run so the test
+    // does not leave work in flight behind it.
+    let run;
+    const handler = createRequestHandler({
+      config,
+      runner: { ...runner, trigger: (reason) => (run = runner.trigger(reason)) },
+      logger,
+      startedAt: Date.now(),
+    });
 
     const res = new MockResponse();
     await handler(
@@ -144,6 +177,7 @@ describe('run logs are useful enough to debug from', () => {
       ),
       res,
     );
+    await run;
 
     const accepted = records.filter((r) => r.event === 'webhook.accepted');
     assert.equal(accepted.length, 1);

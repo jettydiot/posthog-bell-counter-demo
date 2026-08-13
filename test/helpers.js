@@ -15,6 +15,9 @@ export const TEST_ENV = {
   JETTYD_API_TOKEN: 'jettyd-token-abc',
   JETTYD_DEVICE_ID: '11111111-2222-3333-4444-555555555555',
   POSTHOG_API_KEY: 'phx_test_key',
+  // Placeholders. The real project ids belong in the operator's .env, never in
+  // a public repository — see the note on REQUIRED in src/config.js.
+  POSTHOG_PROJECT_IDS: '100001,100002,100003',
 };
 
 export function testConfig(overrides = {}) {

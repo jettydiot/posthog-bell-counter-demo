@@ -15,14 +15,10 @@ export class ConfigError extends Error {
   }
 }
 
-/** The three PostHog projects whose device_claimed events feed the bell. */
-const DEFAULT_PROJECT_IDS = '131280,214227,218818';
-
 const DEFAULTS = {
   PORT: '3000',
   HOST: '0.0.0.0',
   POSTHOG_HOST: 'eu.posthog.com',
-  POSTHOG_PROJECT_IDS: DEFAULT_PROJECT_IDS,
   POSTHOG_EVENT: 'device_claimed',
   RECONCILE_INTERVAL_MINUTES: '15',
   BELL_REST_ANGLE: '90',
@@ -38,6 +34,9 @@ const REQUIRED = [
   'JETTYD_API_TOKEN',
   'JETTYD_DEVICE_ID',
   'POSTHOG_API_KEY',
+  // Deliberately has no default. This repository is public, and a default here
+  // would mean shipping the operator's real PostHog project ids in the source.
+  'POSTHOG_PROJECT_IDS',
 ];
 
 const MIN_SECRET_LENGTH = 16;
@@ -92,15 +91,20 @@ export function loadConfig(env = process.env) {
     );
   }
 
-  const projectIds = String(get('POSTHOG_PROJECT_IDS'))
+  const rawProjectIds = env.POSTHOG_PROJECT_IDS ?? '';
+  const projectIds = String(rawProjectIds)
     .split(',')
     .map((id) => id.trim())
     .filter(Boolean);
-  if (projectIds.length === 0) {
-    problems.push('POSTHOG_PROJECT_IDS must list at least one project');
-  }
-  for (const id of projectIds) {
-    if (!/^\d+$/.test(id)) problems.push(`POSTHOG_PROJECT_IDS contains a non-numeric id: ${id}`);
+  // Only when something was supplied — an empty value already reported itself
+  // as a missing required variable above, and one problem deserves one line.
+  if (rawProjectIds !== '') {
+    if (projectIds.length === 0) {
+      problems.push('POSTHOG_PROJECT_IDS must list at least one project');
+    }
+    for (const id of projectIds) {
+      if (!/^\d+$/.test(id)) problems.push(`POSTHOG_PROJECT_IDS contains a non-numeric id: ${id}`);
+    }
   }
 
   const posthogEvent = String(get('POSTHOG_EVENT'));
@@ -131,6 +135,10 @@ export function loadConfig(env = process.env) {
       timeoutMs: requestTimeoutMs,
     },
 
+    // `restAngle` is a firmware-agreement guard, not a command parameter. Only
+    // `strikeAngle` and `holdMs` go on the wire; the firmware owns the return
+    // leg via the servo's own `home_angle`, and the equality check above is the
+    // only thing `restAngle` actually does.
     bell: { restAngle, strikeAngle, holdMs },
 
     posthog: {

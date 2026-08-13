@@ -7,10 +7,9 @@
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { readdirSync } from 'node:fs';
+import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { readFileSync } from 'node:fs';
 
 import { createBellRunner } from '../src/runner.js';
 import { createJettydClient } from '../src/jettyd.js';
@@ -33,7 +32,7 @@ function buildRunner(fetchImpl) {
 
 describe('the count is never derived locally', () => {
   it('shows the same number twice when PostHog reports the same number twice', async () => {
-    const fetchImpl = mockFetch(posthogCounts({ 131280: 7, 214227: 0, 218818: 0 }));
+    const fetchImpl = mockFetch(posthogCounts({ 100001: 7, 100002: 0, 100003: 0 }));
     const runner = buildRunner(fetchImpl);
 
     await runner.trigger('webhook');
@@ -48,9 +47,9 @@ describe('the count is never derived locally', () => {
   it('follows PostHog downwards when the authoritative count drops', async () => {
     let count = 10;
     const fetchImpl = mockFetch({
-      'posthog:131280': () => jsonResponse(200, { results: [[count]] }),
-      'posthog:214227': jsonResponse(200, { results: [[0]] }),
-      'posthog:218818': jsonResponse(200, { results: [[0]] }),
+      'posthog:100001': () => jsonResponse(200, { results: [[count]] }),
+      'posthog:100002': jsonResponse(200, { results: [[0]] }),
+      'posthog:100003': jsonResponse(200, { results: [[0]] }),
     });
     const runner = buildRunner(fetchImpl);
 
@@ -65,7 +64,7 @@ describe('the count is never derived locally', () => {
   });
 
   it('re-queries on every run rather than caching the previous total', async () => {
-    const fetchImpl = mockFetch(posthogCounts({ 131280: 1, 214227: 1, 218818: 1 }));
+    const fetchImpl = mockFetch(posthogCounts({ 100001: 1, 100002: 1, 100003: 1 }));
     const runner = buildRunner(fetchImpl);
 
     await runner.trigger('webhook');
@@ -77,9 +76,16 @@ describe('the count is never derived locally', () => {
 
   it('leaves no counter state on disk and no ++ in the source', () => {
     // The old version of this demo persisted a counter.json. Nothing here should.
-    const sources = readdirSync(SRC_DIR).filter((f) => f.endsWith('.js'));
+    //
+    // Recursive, so a src/ subdirectory added later cannot quietly escape the
+    // scan. This is a tripwire, not the guarantee — the pattern only catches
+    // `count++` and `count +=`, not `total++` or `count = count + 1`. The
+    // behavioural tests above are what actually hold the property.
+    const sources = sourceFiles();
+    assert.ok(sources.length > 0, 'the scan found no source files — the path is wrong');
+
     for (const file of sources) {
-      const text = readFileSync(join(SRC_DIR, file), 'utf8');
+      const text = readFileSync(file, 'utf8');
       assert.doesNotMatch(text, /counter\.json/i, `${file} must not persist a counter`);
       assert.doesNotMatch(
         text,
@@ -89,3 +95,10 @@ describe('the count is never derived locally', () => {
     }
   });
 });
+
+/** Every `.js` file under src/, at any depth. */
+function sourceFiles() {
+  return readdirSync(SRC_DIR, { recursive: true })
+    .map((entry) => join(SRC_DIR, String(entry)))
+    .filter((path) => path.endsWith('.js') && statSync(path).isFile());
+}

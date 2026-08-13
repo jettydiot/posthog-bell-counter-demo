@@ -52,15 +52,18 @@ this bug. The SDK's host suite covers it with a wire sniffer that samples DIN on
 each CLK rising edge and closes a frame on the CS latch:
 
 ```bash
-cd jettyd-sdk/test && make test        # expect all suites green
+cd jettyd-sdk/test && rm -rf build && make test    # expect all suites green
 ```
 
 Those tests fail against the unpatched driver and pass against the patched one.
-Note that `make test` has bitten people here: `build/test_display` did not list
+
+**The `rm -rf build` is not optional.** `build/test_display` does not list
 `../drivers/display/display.c` as a prerequisite even though the test
-`#include`s it, so a driver-only edit could leave a stale binary reporting the
-*old* result. If a run's result does not match the edit you just made, delete
-`test/build/` and re-run before believing it.
+`#include`s it, so `make` sees nothing to rebuild after a driver-only edit and
+re-runs the stale binary. Applying the patch and running a bare `make test`
+therefore reports the *unpatched* result — green before the fix, and green in
+exactly the same way after it. Delete the build directory or the run tells you
+nothing.
 
 **Scope.** The driver is shared, so this also changes `devices/display-demo-v1`
 on any board with a same-wired FC16 panel. That is intended — the old order was
@@ -86,6 +89,11 @@ Above 99999 the driver compacts numbers (`100k`, `1.0M`, `99M`, `999M`, `1B`).
 
 ESP-IDF **v5.3.2**, target `esp32c6`.
 
+The SDK revision is pinned by the template's submodule, but ESP-IDF is not —
+`export.sh` activates whatever happens to be checked out at `$IDF_PATH`, which
+on a shared machine is rarely the version this was verified against. Pin it and
+check it before building, rather than finding out from a link error:
+
 ```bash
 git clone https://github.com/jettydiot/jettyd-firmware-template.git bell-rig
 cd bell-rig
@@ -95,7 +103,17 @@ git apply ../firmware/display-module-order.patch --directory=jettyd-sdk
 cp ../firmware/device.yaml .
 cp ../firmware/main.c main/
 
+# Pin ESP-IDF to the verified revision.
+git -C $HOME/esp/esp-idf fetch --tags
+git -C $HOME/esp/esp-idf checkout v5.3.2
+git -C $HOME/esp/esp-idf submodule update --init --recursive
+$HOME/esp/esp-idf/install.sh esp32c6
+
 . $HOME/esp/esp-idf/export.sh
+
+# Fail here rather than three minutes into a build against the wrong headers.
+idf.py --version | grep -q 'v5\.3\.2' || { echo "ESP-IDF is not v5.3.2"; exit 1; }
+
 idf.py set-target esp32c6
 idf.py build
 ```
@@ -129,34 +147,55 @@ idf.py -p /dev/cu.usbmodem3101 flash monitor
 
 For a board that is **already provisioned** — one that has a device identity,
 WiFi credentials and a fleet token in NVS — flash the app partition **only**.
-A full `idf.py flash` rewrites the partition table and can erase NVS, which
-destroys the device identity and un-claims it from the platform:
+
+`idf.py flash` does *not* erase NVS: it writes the bootloader, the partition
+table and the app, and leaves other partitions alone. The danger is subtler than
+an erase. If the partition table it writes moves or resizes `nvs`, the existing
+NVS contents stay on the chip but no longer line up with the layout the firmware
+reads, so the device identity is effectively gone — same outcome, no erase
+required. Writing only the app image avoids the question entirely.
+
+**Do not copy the offsets below.** ESP-IDF assigns partition offsets from the
+project's own partition table; they change with flash size, with an added
+partition, with a resized one. Read them from the table you just built:
 
 ```bash
-# 1. Back up first. Always.
-python3 -m esptool --chip esp32c6 --port /dev/cu.usbmodem3101 \
-  read_flash 0x9000 0x6000 nvs-backup.bin
+# 1. Print this build's actual layout, and keep it in front of you.
+python3 $IDF_PATH/components/partition_table/gen_esp32part.py \
+  build/partition_table/partition-table.bin
 
-# 2. Write the app image only, into the active OTA slot.
+# 2. Resolve the *active* OTA slot from otadata rather than guessing.
+#    Take otadata's own offset from the table above (do not assume 0xf000).
+#    Each of the two 32-byte entries holds ota_seq followed by a CRC; an entry
+#    counts only if its CRC matches esp_rom_crc32_le(~0, &seq, 4), and the
+#    active slot is (ota_seq - 1) % 2. If neither entry is valid the board is
+#    running the factory app and there is no OTA slot to write.
+python3 -m esptool --chip esp32c6 --port /dev/cu.usbmodem3101 \
+  read_flash <otadata_offset> <otadata_size> otadata.bin
+
+# 3. Back up NVS, using the nvs offset and size from step 1.
+python3 -m esptool --chip esp32c6 --port /dev/cu.usbmodem3101 \
+  read_flash <nvs_offset> <nvs_size> nvs-backup.bin
+
+# 4. Write the app image only, at the resolved slot's offset.
 python3 -m esptool --chip esp32c6 --port /dev/cu.usbmodem3101 --baud 460800 \
   --before default_reset --after no_reset \
   write_flash --flash_mode dio --flash_size keep --flash_freq 80m \
-  0x20000 build/jettyd-device.bin
+  <active_ota_offset> build/jettyd-device.bin
 
-# 3. Verify.
+# 5. Verify.
 python3 -m esptool --chip esp32c6 --port /dev/cu.usbmodem3101 \
-  verify_flash 0x20000 build/jettyd-device.bin
+  verify_flash <active_ota_offset> build/jettyd-device.bin
 ```
 
-`0x20000` is the `ota_0` offset on the verified rig. **Confirm the active slot
-on your own board** by decoding `otadata` at `0xf000` rather than assuming —
-active slot is `(ota_seq - 1) % 2`, and the entry is only valid if its CRC
-matches `esp_rom_crc32_le(~0, &seq, 4)`. Never use `erase_flash`, and always
-pass `--flash_size keep` so the image header is not rewritten.
+On the verified rig those resolved to `nvs` at `0x9000`/`0x6000`, `otadata` at
+`0xf000` and an active `ota_0` at `0x20000` — recorded as a sanity check on your
+own output, not as values to reuse. Never use `erase_flash`, and always pass
+`--flash_size keep` so the image header is not rewritten.
 
 ## Expected boot log
 
-```
+```text
 I (502) jettyd:   Device: posthog-bell-counter-c6
 I (542) jettyd_prov: Provision state: provisioned (tenant: …)
 I (702) jettyd_drv: Registered driver: display (instance: display, caps: 0)
@@ -206,5 +245,21 @@ this device, but they will bite an adjacent one:
 3. `jettyd_driver_t.init` is assigned by every driver and invoked by none.
 4. `sdkconfig.defaults` sets `CONFIG_ESPTOOLPY_FLASHSIZE_4MB` while this board
    has 8 MB, hence the boot warning `Detected size(8192k) larger than the size
-   in the binary image header(4096k)`. Harmless — the partition table ends at
-   4 MB — but roughly 4 MB is left unusable.
+   in the binary image header(4096k)`. Harmless for this device — the partition
+   table ends well before 4 MB — but the upper 4 MB is unaddressable, so a
+   larger OTA slot or a data partition cannot be added without fixing it first.
+   To match the hardware, in the generated project:
+
+   ```bash
+   sed -i '' 's/^CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y$/CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y/' \
+     sdkconfig.defaults
+   sed -i '' 's/^CONFIG_ESPTOOLPY_FLASHSIZE="4MB"$/CONFIG_ESPTOOLPY_FLASHSIZE="8MB"/' \
+     sdkconfig.defaults
+   rm -f sdkconfig && idf.py build
+   ```
+
+   Deleting `sdkconfig` matters: it is generated once from the defaults and is
+   not refreshed when they change, so editing `sdkconfig.defaults` alone leaves
+   the build on 4 MB. Note this changes the image header — reflash the
+   bootloader too, which on a provisioned board means the partition-table
+   caution above applies.

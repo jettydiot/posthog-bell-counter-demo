@@ -6,18 +6,16 @@
  */
 
 export async function postJson(fetchImpl, url, { headers = {}, body, timeoutMs = 10000 } = {}) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    return await fetchImpl(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...headers },
-      body: JSON.stringify(body),
-      signal: controller.signal,
-    });
-  } finally {
-    clearTimeout(timer);
-  }
+  return fetchImpl(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...headers },
+    body: JSON.stringify(body),
+    // `AbortSignal.timeout` rather than a timer cleared once headers arrive: the
+    // deadline has to outlive the response headers. A peer that sends a status
+    // line and then stalls mid-body would otherwise leave `readJson` pending
+    // forever, holding the single run slot open and the webhook unanswered.
+    signal: AbortSignal.timeout(timeoutMs),
+  });
 }
 
 /** Read a JSON body without letting a malformed response mask the status code. */

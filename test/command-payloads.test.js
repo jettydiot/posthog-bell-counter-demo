@@ -62,12 +62,21 @@ describe('servo.rotate — the bell strike', () => {
   });
 
   it('raises JettydCommandError on a non-2xx response', async () => {
-    const fetchImpl = mockFetch({ 'jettyd:servo.rotate': jsonResponse(502, { error: 'gateway' }) });
+    // The failure body echoes the bearer token back at us — an upstream that
+    // quotes the request in its error is exactly the case redaction exists for,
+    // and a fixture without the token in it cannot catch redaction going away.
+    const fetchImpl = mockFetch({
+      'jettyd:servo.rotate': jsonResponse(502, {
+        error: 'gateway rejected Authorization: Bearer jettyd-token-abc',
+      }),
+    });
     const { client } = buildClient(fetchImpl);
 
     const err = await catchAsync(() => client.ringBell(), JettydCommandError);
     assert.equal(err.status, 502);
+    assert.match(err.message, /gateway rejected/, 'the useful part of the detail survives');
     assert.doesNotMatch(err.message, /jettyd-token-abc/);
+    assert.match(err.message, /\[redacted\]/);
   });
 });
 
