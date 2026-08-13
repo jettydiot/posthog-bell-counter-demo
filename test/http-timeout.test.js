@@ -37,6 +37,18 @@ describe('postJson', () => {
     assert.deepEqual(JSON.parse(seen.body), { command_type: 'servo.rotate' });
   });
 
+  /**
+   * `AbortSignal.timeout`'s internal timer is unref'd, so it does not by itself
+   * keep the event loop alive. In the service that is irrelevant — a pending
+   * socket holds the loop open until the abort lands — but a test with nothing
+   * else scheduled can reach loop exit first. These hold the loop across the
+   * deadline so the assertion is about the signal, not about scheduling luck.
+   */
+  function holdLoopOpen(ms) {
+    const handle = setTimeout(() => {}, ms);
+    return () => clearTimeout(handle);
+  }
+
   it('keeps the deadline live after the response headers arrive', async () => {
     // The regression this guards: clearing a timer in a `finally` once fetch
     // resolves leaves the body read with no deadline at all.
@@ -53,7 +65,7 @@ describe('postJson', () => {
     assert.equal(response.ok, true);
     assert.equal(signal.aborted, false, 'the deadline must not be cancelled by headers arriving');
 
-    await new Promise((resolve) => setTimeout(resolve, 40));
+    await new Promise((resolve) => setTimeout(resolve, 60));
     assert.equal(signal.aborted, true, 'a stalled body must still hit the deadline');
     assert.equal(signal.reason?.name, 'TimeoutError');
   });
@@ -74,9 +86,14 @@ describe('postJson', () => {
       { body: {}, timeoutMs: 20 },
     );
 
-    // readJson swallows the failure into null rather than masking the status,
-    // but the point is that it *settles* instead of hanging forever.
-    assert.equal(await readJson(stalled), null);
+    const release = holdLoopOpen(2000);
+    try {
+      // readJson swallows the failure into null rather than masking the status,
+      // but the point is that it *settles* instead of hanging forever.
+      assert.equal(await readJson(stalled), null);
+    } finally {
+      release();
+    }
   });
 });
 
