@@ -8,7 +8,7 @@ are drivers on **one** ESP32-C6 running the [Jettyd](https://jettyd.com)
 firmware SDK, commanded over the Jettyd public API. The trigger is a PostHog
 webhook on `device_claimed`; the number is whatever PostHog says the number is.
 
-```
+```text
                                    ┌─────────────────────────────┐
   PostHog  ──── webhook ─────────► │                             │
   (device_claimed)                 │   this service              │
@@ -68,7 +68,7 @@ Claims arrive in bursts, and a bell that is already swinging must not be told to
 swing again. Runs are **serialised**, and everything arriving mid-run is
 **coalesced** into a single follow-up run:
 
-```
+```text
 webhooks:   │ 1  2 3 4 5 │
 runs:       │ ─── A ───────── B ─── │      5 webhooks → 2 strikes
                  ↑            ↑
@@ -443,7 +443,7 @@ through this before recording.
 
 ## Layout
 
-```
+```text
 src/
   index.js      wiring, graceful shutdown
   config.js     environment parsing and validation
