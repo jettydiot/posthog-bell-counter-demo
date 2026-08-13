@@ -21,15 +21,22 @@ export function createLogger({
     // The reserved keys go *after* the spreads. Consumers filter on `event` and
     // `level`, so a caller field of the same name — a PostHog payload carries
     // its own `event`, for one — would otherwise make the line unfindable.
-    sink(
-      JSON.stringify({
-        ...bindings,
-        ...fields,
-        ts: now().toISOString(),
-        level: levelName,
-        event,
-      }),
-    );
+    const line = JSON.stringify({
+      ...bindings,
+      ...fields,
+      ts: now().toISOString(),
+      level: levelName,
+      event,
+    });
+
+    try {
+      sink(line);
+    } catch {
+      // Losing a log line is a bad day; taking the service down with it is a
+      // worse one. `process.stdout.write` throws on EPIPE — pipe the container
+      // logs into something that exits and every subsequent log call would
+      // otherwise propagate an exception into whatever run made it.
+    }
   }
 
   return {

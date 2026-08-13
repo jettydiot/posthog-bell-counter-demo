@@ -11,6 +11,7 @@ import assert from 'node:assert/strict';
 import { createBellRunner } from '../src/runner.js';
 import { createJettydClient } from '../src/jettyd.js';
 import { createPostHogClient } from '../src/posthog.js';
+import { createLogger } from '../src/logger.js';
 import {
   captureLogger,
   deferred,
@@ -237,6 +238,67 @@ describe('every result has the same shape', () => {
       new Promise((resolve) => setTimeout(() => resolve('TIMED OUT'), 500)),
     ]);
     assert.notEqual(result, 'TIMED OUT');
+  });
+
+  it('resolves the caller even when the logger itself is what is broken', async () => {
+    // The nastiest version: the logger is one of the few things called outside
+    // runOnce's own try blocks, so it is a likely cause of an internal failure
+    // *and* the thing the handler would use to report it. Reporting the failure
+    // must not be able to cause a second one.
+    const config = testConfig();
+    const dead = () => {
+      throw new Error('stdout is gone');
+    };
+    const runner = createBellRunner({
+      config,
+      jettyd: createJettydClient(config, { fetch: mockFetch(), logger: { debug() {} } }),
+      posthog: createPostHogClient(config, { fetch: mockFetch(), logger: { debug() {} } }),
+      logger: { debug: dead, info: dead, warn: dead, error: dead, child: dead },
+    });
+
+    const result = await Promise.race([
+      runner.trigger('webhook'),
+      new Promise((resolve) => setTimeout(() => resolve('TIMED OUT'), 500)),
+    ]);
+
+    assert.notEqual(result, 'TIMED OUT', 'a dead logger must not strand the caller');
+    assert.equal(result.error.stage, 'internal');
+    assert.equal(runner.stats().busy, false, 'the run slot has to be released too');
+  });
+
+  it('keeps draining the queue when the logger is dead', async () => {
+    // A stranded job would also abandon everything queued behind it.
+    const config = testConfig();
+    const dead = () => {
+      throw new Error('stdout is gone');
+    };
+    const runner = createBellRunner({
+      config,
+      jettyd: createJettydClient(config, { fetch: mockFetch(), logger: { debug() {} } }),
+      posthog: createPostHogClient(config, { fetch: mockFetch(), logger: { debug() {} } }),
+      logger: { debug: dead, info: dead, warn: dead, error: dead, child: dead },
+    });
+
+    const results = await Promise.race([
+      Promise.all([runner.trigger('webhook'), runner.trigger('webhook')]),
+      new Promise((resolve) => setTimeout(() => resolve('TIMED OUT'), 500)),
+    ]);
+
+    assert.notEqual(results, 'TIMED OUT');
+    assert.equal(results.length, 2);
+  });
+});
+
+describe('the logger never breaks the thing it is describing', () => {
+  it('drops a line rather than propagating a sink failure', () => {
+    const logger = createLogger({
+      level: 'info',
+      sink: () => {
+        throw new Error('EPIPE: broken pipe');
+      },
+    });
+
+    assert.doesNotThrow(() => logger.info('run.finished', { count: 1 }));
   });
 
   /**

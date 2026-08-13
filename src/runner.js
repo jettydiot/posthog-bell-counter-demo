@@ -42,10 +42,12 @@ export function createBellRunner({ config, jettyd, posthog, logger, clock = () =
         pendingBell = { kind: 'bell', reason, requests: 0, resolve: gate.resolve, promise: gate.promise };
       }
       pendingBell.requests += 1;
-      logger.info('run.coalesced', {
-        trigger: reason,
-        queued_requests: pendingBell.requests,
-      });
+      logSafely(() =>
+        logger.info('run.coalesced', {
+          trigger: reason,
+          queued_requests: pendingBell.requests,
+        }),
+      );
       return pendingBell.promise;
     }
     return start({ kind: 'bell', reason, requests: 1 });
@@ -54,10 +56,12 @@ export function createBellRunner({ config, jettyd, posthog, logger, clock = () =
   function reconcile(reason = 'scheduler') {
     if (busy) {
       if (pendingReconcile) {
-        logger.info('reconcile.skipped', {
-          trigger: reason,
-          why: 'a reconcile is already queued behind the running job',
-        });
+        logSafely(() =>
+          logger.info('reconcile.skipped', {
+            trigger: reason,
+            why: 'a reconcile is already queued behind the running job',
+          }),
+        );
         // Same field set as every other result, so a caller never has to branch
         // on which path produced it — but built with buildResult rather than
         // finish, because nothing ran: overwriting `lastRun` here would erase
@@ -112,7 +116,13 @@ export function createBellRunner({ config, jettyd, posthog, logger, clock = () =
           // a caller can never be left with an unresolved promise. It goes
           // through finish() like every other outcome, so /healthz reports the
           // run that just failed rather than the last one that worked.
-          logger.error('run.unexpected_error', { error: String(err?.message ?? err) });
+          //
+          // Note what threw is often the logger itself — it is one of the few
+          // things called outside runOnce's own try blocks — so reporting the
+          // failure must not be able to cause a second one.
+          logSafely(() =>
+            logger.error('run.unexpected_error', { error: String(err?.message ?? err) }),
+          );
           result = finish(job, {
             runId: null,
             startedAt: clock(),
@@ -252,21 +262,39 @@ export function createBellRunner({ config, jettyd, posthog, logger, clock = () =
     };
   }
 
-  /** buildResult, plus the two side effects a run that actually happened has. */
+  /**
+   * buildResult, plus the two side effects a run that actually happened has.
+   *
+   * Total by construction. The result is built and recorded before anything is
+   * logged, and the log itself cannot throw out of here: `finish` is on the
+   * path that guarantees a caller is never left with an unresolved promise, and
+   * a dead stdout is not a reason to strand a webhook.
+   */
   function finish(job, outcome) {
     const result = buildResult(job, outcome);
 
     lastRun = result;
-    logger.info('run.finished', {
-      run_id: result.runId,
-      kind: result.kind,
-      ok: result.ok,
-      bell_ok: result.bell.ok,
-      count: result.count,
-      displayed: result.displayed,
-      duration_ms: result.durationMs,
-    });
+    logSafely(() =>
+      logger.info('run.finished', {
+        run_id: result.runId,
+        kind: result.kind,
+        ok: result.ok,
+        bell_ok: result.bell.ok,
+        count: result.count,
+        displayed: result.displayed,
+        duration_ms: result.durationMs,
+      }),
+    );
     return result;
+  }
+
+  /** Emit a line, or don't. Never let logging be the thing that breaks a run. */
+  function logSafely(emit) {
+    try {
+      emit();
+    } catch {
+      // Nothing useful to do here: the reporting channel is the broken part.
+    }
   }
 
   return {
